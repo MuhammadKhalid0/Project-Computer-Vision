@@ -334,6 +334,7 @@ def main():
     parser.add_argument("--th_top", type=float, default=0.01, help="RANSAC inlier threshold for box top (scene units)")
     parser.add_argument("--save-viz", action="store_true", help="Save amplitude/cloud/mask visualizations")
     parser.add_argument("--sample-step", type=int, default=5, help="Downsample for point-cloud scatter (speed)")
+    parser.add_argument("--max-itr", type=int, default=5, help="Number of iterations to use in RANSAC Algoraithm")
     args = parser.parse_args()
 
     # In headless terminals, Agg avoids show() warnings
@@ -355,7 +356,12 @@ def main():
 
     # 3) Find planes + masks
     (n_floor, d_floor, floor_mask), (n_top, d_top, box_top_mask) = \
-        find_floor_and_box_planes(PC, threshold_floor=args.th_floor, threshold_box=args.th_top)
+    find_floor_and_box_planes(
+        PC,
+        threshold_floor=args.th_floor,
+        threshold_box=args.th_top,
+        max_iter=args.max_itr
+    )
 
     # 4) Height
     h = box_height(n_floor, d_floor, n_top, d_top)
