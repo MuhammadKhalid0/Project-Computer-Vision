@@ -160,7 +160,7 @@ def plane_mask_from_inliers(inlier_mask_flat, H, W): # Function to return the ma
     mask[:len(inlier_mask_flat)] = inlier_mask_flat
     return mask.reshape(H, W)
 
-def find_floor_and_box_planes(PC, threshold_floor, threshold_box, max_iter=5000):
+def find_floor_and_box_planes(PC, threshold_floor, threshold_box, max_iter=10000):
     H, W, _ = PC.shape
     pts = PC.reshape(-1, 3) #Flatten
 
@@ -211,3 +211,178 @@ def box_height(n_floor, d_floor, n_top, d_top):
         n_top, d_top = -n_top, -d_top
     # distance between parallel planes with unit normals
     return abs(d_top - d_floor)
+
+def save_overlay(image2d, mask, title, out_path):
+    """Save an overlay of a binary mask on top of a 2D image."""
+    plt.figure(figsize=(6,5))
+    plt.imshow(image2d, cmap='gray')
+    # show mask edges in a contrasting colormap with some transparency
+    plt.imshow(np.ma.masked_where(~mask, mask), alpha=0.35, cmap='autumn')
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300)
+    plt.close()
+
+def orthonormal_basis_from_normal(n):
+    n = n / np.linalg.norm(n)
+    # pick a vector not parallel to n
+    a = np.array([1.0, 0.0, 0.0]) if abs(n[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u = np.cross(n, a); u /= np.linalg.norm(u)
+    v = np.cross(n, u)
+    return u, v  # both unit, orthogonal, spanning the plane
+
+def project_points_to_plane_uv(P, n, d):
+    """
+    P: (N,3) points on (or near) the plane
+    plane: n·x = d  (with ||n||=1 recommended)
+    Returns: U,V coordinates (N,2) in the plane frame and the (p0,u,v)
+    """
+    n = n / np.linalg.norm(n)
+    # anchor point p0 on plane: along n from origin
+    p0 = n * d
+    u, v = orthonormal_basis_from_normal(n)
+    Q = P - p0  # (N,3)
+    UV = np.c_[Q @ u, Q @ v]  # (N,2)
+    return UV, p0, u, v
+
+def oriented_rect_from_points_2d(UV):
+    """
+    PCA-oriented rectangle on 2D points UV (N,2)
+    Returns 4 corners in the same (U,V) coordinate frame, ordered around.
+    """
+    mu = UV.mean(axis=0)
+    X = UV - mu
+    C = (X.T @ X) / len(UV)
+    w, V = np.linalg.eigh(C)        # ascending
+    R = V[:, ::-1]                  # columns: principal axes (2x2)
+    Y = X @ R
+    mins = Y.min(axis=0); maxs = Y.max(axis=0)
+    rect = np.array([
+        [mins[0], mins[1]],
+        [maxs[0], mins[1]],
+        [maxs[0], maxs[1]],
+        [mins[0], maxs[1]],
+    ])
+    # back to UV frame
+    corners_uv = rect @ R.T + mu
+
+    # order clockwise
+    c = corners_uv.mean(axis=0)
+    ang = np.arctan2(corners_uv[:,1]-c[1], corners_uv[:,0]-c[0])
+    return corners_uv[np.argsort(ang)]
+
+def corners3d_from_box_top(PC, box_top_mask, n_top, d_top):
+    """Return 4 accurate 3D corners from the top mask using plane UV coordinates."""
+    H, W, _ = PC.shape
+    # gather top points (valid z)
+    ys, xs = np.nonzero(box_top_mask)
+    P = PC[ys, xs, :]              # (N,3)
+    P = P[P[:,2] != 0]             # safety
+
+    # project to plane 2D coords
+    UV, p0, u, v = project_points_to_plane_uv(P, n_top, d_top)
+
+    # (optional) small denoise in UV by removing extreme outliers
+    # keep central quantile to avoid tiny speckles
+    lo, hi = np.percentile(UV, [1, 99], axis=0)
+    keep = (UV[:,0] >= lo[0]) & (UV[:,0] <= hi[0]) & (UV[:,1] >= lo[1]) & (UV[:,1] <= hi[1])
+    UVc = UV[keep]
+
+    # oriented rectangle in plane frame
+    corners_uv = oriented_rect_from_points_2d(UVc)   # (4,2)
+
+    # back to 3D: p = p0 + U*u + V*v
+    corners_3d = np.array([p0 + c[0]*u + c[1]*v for c in corners_uv])
+    return corners_3d  # (4,3)
+
+# lengths (metric)
+def lengths_from_corners_3d(P):
+    d = lambda a,b: float(np.linalg.norm(P[a]-P[b]))
+    e01, e12, e23, e30 = d(0,1), d(1,2), d(2,3), d(3,0)
+    L = 0.5 * (e01 + e23); W = 0.5 * (e12 + e30)
+    return (L, W) if L >= W else (W, L)
+
+def save_corners_overlay(img, corners_rc, path, title):
+    plt.figure(figsize=(6,5))
+    plt.imshow(img, cmap='gray')
+    r, c = corners_rc[:,0], corners_rc[:,1]
+    plt.plot(np.r_[c, c[0]], np.r_[r, r[0]], '-')
+    plt.scatter(c, r, s=30)
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(path, dpi=300)
+    plt.close()
+    
+def corners_pixels_from_3d(PC, corners3d):
+    H, W, _ = PC.shape
+    pts = PC.reshape(-1,3)
+    # naive nearest-neighbor in 3D; for speed you can downsample or use KD-tree
+    idxs = []
+    for p in corners3d:
+        d2 = np.sum((pts - p)**2, axis=1)
+        idxs.append(np.argmin(d2))
+    idxs = np.array(idxs)
+    rows = idxs // W
+    cols = idxs %  W
+    return np.c_[rows, cols]
+
+def main():
+    parser = argparse.ArgumentParser(description="Estimate box height from planes using RANSAC.")
+    parser.add_argument("mat_path", type=Path, help="Path to the .mat file")
+    parser.add_argument("--example", type=int, default=1, help="Example number in the .mat (default: 1)")
+    parser.add_argument("--th_floor", type=float, default=0.01, help="RANSAC inlier threshold for floor (scene units)")
+    parser.add_argument("--th_top", type=float, default=0.01, help="RANSAC inlier threshold for box top (scene units)")
+    parser.add_argument("--save-viz", action="store_true", help="Save amplitude/cloud/mask visualizations")
+    parser.add_argument("--sample-step", type=int, default=5, help="Downsample for point-cloud scatter (speed)")
+    args = parser.parse_args()
+
+    # In headless terminals, Agg avoids show() warnings
+    import matplotlib
+    matplotlib.use("Agg")
+
+    # 1) Load data
+    A, D, PC = load_example(args.mat_path, example_num=args.example)
+
+    # 2) Optional visualizations
+    if args.save_viz:
+        plot_amplitude_image(A, title=f"Amplitude – Example {args.example}",
+                             save_path=f"example{args.example}_amplitude.png")
+        try:
+            plot_point_cloud(PC, color_by='z', sample_step=args.sample_step,
+                             save_path=f"example{args.example}_cloud.png")
+        except Exception as e:
+            print(f"[warn] Point cloud plot skipped: {e}")
+
+    # 3) Find planes + masks
+    (n_floor, d_floor, floor_mask), (n_top, d_top, box_top_mask) = \
+        find_floor_and_box_planes(PC, threshold_floor=args.th_floor, threshold_box=args.th_top)
+
+    # 4) Height
+    h = box_height(n_floor, d_floor, n_top, d_top)
+    print(f"Estimated box height (scene units): {h:.6f}")
+
+    # Length & width
+    Pcorners3D = corners3d_from_box_top(PC, box_top_mask, n_top, d_top)
+    length, width = lengths_from_corners_3d(Pcorners3D)
+    print(f"Length={length:.4f}, Width={width:.4f}")
+
+    # 5) Save masks / overlays
+    if args.save_viz:
+        # raw masks already cleaned in find_floor_and_box_planes
+        plt.imsave(f"example{args.example}_floor_mask.png", floor_mask, cmap='gray')
+        plt.imsave(f"example{args.example}_boxtop_mask.png", box_top_mask, cmap='gray')
+
+        # Overlays (use amplitude as the background)
+        save_overlay(A, floor_mask, f"Floor mask – Example {args.example}",
+                     f"example{args.example}_floor_overlay.png")
+        save_overlay(A, box_top_mask, f"Box-top mask – Example {args.example}",
+                     f"example{args.example}_boxtop_overlay.png")
+        
+        corners_rc = corners_pixels_from_3d(PC, Pcorners3D)
+        save_corners_overlay(A, corners_rc,
+            f"example{args.example}_top_corners_refined.png",
+            f"Top corners (3D-refined) – Example {args.example}")
+
+
+if __name__ == "__main__":
+    main()
