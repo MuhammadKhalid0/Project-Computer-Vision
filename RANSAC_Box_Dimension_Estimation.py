@@ -366,10 +366,10 @@ def main():
     # 2) Optional visualizations
     if args.save_viz:
         plot_amplitude_image(A, title=f"Amplitude – Example {args.example}",
-                             save_path=f"example{args.example}_amplitude.png")
+                             save_path=f"Results/example{args.example}_amplitude.png")
         try:
             plot_point_cloud(PC, color_by='z', sample_step=args.sample_step,
-                             save_path=f"example{args.example}_cloud.png")
+                             save_path=f"Results/example{args.example}_cloud.png")
         except Exception as e:
             print(f"[warn] Point cloud plot skipped: {e}")
 
@@ -394,18 +394,18 @@ def main():
     # 5) Save masks / overlays
     if args.save_viz:
         # raw masks already cleaned in find_floor_and_box_planes
-        plt.imsave(f"example{args.example}_floor_mask.png", floor_mask, cmap='gray')
-        plt.imsave(f"example{args.example}_boxtop_mask.png", box_top_mask, cmap='gray')
+        plt.imsave(f"Results/example{args.example}_floor_mask.png", floor_mask, cmap='gray')
+        plt.imsave(f"Results/example{args.example}_boxtop_mask.png", box_top_mask, cmap='gray')
 
         # Overlays (use amplitude as the background)
         save_overlay(A, floor_mask, f"Floor mask – Example {args.example}",
-                     f"example{args.example}_floor_overlay.png")
+                     f"Results/example{args.example}_floor_overlay.png")
         save_overlay(A, box_top_mask, f"Box-top mask – Example {args.example}",
-                     f"example{args.example}_boxtop_overlay.png")
+                     f"Results/example{args.example}_boxtop_overlay.png")
         
         corners_rc = corners_pixels_from_3d(PC, Pcorners3D)
         save_corners_overlay(A, corners_rc,
-            f"example{args.example}_top_corners_refined.png",
+            f"Results/example{args.example}_top_corners_refined.png",
             f"Top corners (3D-refined) – Example {args.example}")
 
 
