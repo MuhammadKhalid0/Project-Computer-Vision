@@ -162,35 +162,51 @@ def plane_mask_from_inliers(inlier_mask_flat, H, W): # Function to return the ma
 
 def find_floor_and_box_planes(PC, threshold_floor, threshold_box, max_iter=10000):
     H, W, _ = PC.shape
-    pts = PC.reshape(-1, 3) #Flatten
+    pts = PC.reshape(-1, 3) # Flatten
 
-    # valid points only (z != 0) # as per the instructions
+    # valid points only (z != 0)
     valid = pts[:, 2] != 0
     pts_valid = pts[valid]
 
     # 1) floor
-    (n_floor, d_floor), inliers_floor = ransac_plane(pts_valid, threshold=threshold_floor, max_iter=max_iter)
-    floor_mask_valid = inliers_floor
-    # map back to HxW
+    (n_floor, d_floor), inliers_floor = ransac_plane(
+        pts_valid, threshold=threshold_floor, max_iter=max_iter
+    )
+
+    # map back to HxW (for visualization only)
     floor_mask = np.zeros(H*W, dtype=bool)
-    floor_mask[np.where(valid)[0][floor_mask_valid]] = True
+    floor_mask[np.where(valid)[0][inliers_floor]] = True
     floor_mask = floor_mask.reshape(H, W)
 
-    # morphology cleanup (tune structure size)
+    # morphology cleanup (visualization only)
     floor_clean = binary_opening(floor_mask, structure=np.ones((3,3)))
     floor_clean = binary_closing(floor_clean, structure=np.ones((5,5)))
     floor_clean = binary_fill_holes(floor_clean)
 
-    # 2) remove floor points
-    keep_mask = (~floor_clean).reshape(-1)
-    keep_mask = keep_mask & valid
+    # ---------- Minimal changes start here ----------
+    # (2) Fix normal direction so that "above" means positive signed distance.
+    n_floor_u = n_floor / np.linalg.norm(n_floor)
+    signed_valid = pts_valid @ n_floor_u - d_floor
+    if np.median(signed_valid) < 0:
+        n_floor, d_floor = -n_floor, -d_floor
+        n_floor_u = -n_floor_u
+        signed_valid = -signed_valid  # keep consistent
 
+    # (1) Remove floor geometrically using distance to the plane; then keep only "above".
+    signed_all = pts @ n_floor_u - d_floor
+    floor_remove_eps = max(threshold_floor * 1.5, threshold_floor + 1e-9)
+
+    keep_mask = valid & (np.abs(signed_all) > floor_remove_eps) & (signed_all > 0)
     pts_keep = pts[keep_mask]
+    # ---------- Minimal changes end here ----------
 
     # 3) box top
-    (n_top, d_top), inliers_top = ransac_plane(pts_keep, threshold=threshold_box, max_iter=max_iter)
+    (n_top, d_top), inliers_top = ransac_plane(
+        pts_keep, threshold=threshold_box, max_iter=max_iter
+    )
     box_mask_all = np.zeros(H*W, dtype=bool)
-    box_mask_all[np.where(keep_mask)[0][inliers_top]] = True
+    keep_idx = np.where(keep_mask)[0]
+    box_mask_all[keep_idx[inliers_top]] = True
     box_mask = box_mask_all.reshape(H, W)
 
     # largest connected component on box mask
@@ -204,6 +220,9 @@ def find_floor_and_box_planes(PC, threshold_floor, threshold_box, max_iter=10000
         box_top_cc = box_mask
 
     return (n_floor, d_floor, floor_clean), (n_top, d_top, box_top_cc)
+
+
+
 
 def box_height(n_floor, d_floor, n_top, d_top):
     # Ensure normals point roughly the same way
@@ -333,8 +352,8 @@ def main():
     parser.add_argument("--th_floor", type=float, default=0.01, help="RANSAC inlier threshold for floor (scene units)")
     parser.add_argument("--th_top", type=float, default=0.01, help="RANSAC inlier threshold for box top (scene units)")
     parser.add_argument("--save-viz", action="store_true", help="Save amplitude/cloud/mask visualizations")
-    parser.add_argument("--sample-step", type=int, default=5, help="Downsample for point-cloud scatter (speed)")
-    parser.add_argument("--max-itr", type=int, default=5, help="Number of iterations to use in RANSAC Algoraithm")
+    parser.add_argument("--sample-step", type=int, default=0, help="Downsample for point-cloud scatter (speed)")
+    parser.add_argument("--max-itr", type=int, default=10000, help="Number of iterations to use in RANSAC Algoraithm")
     args = parser.parse_args()
 
     # In headless terminals, Agg avoids show() warnings
