@@ -1,4 +1,4 @@
-# Group Assignment 1: "Box Dimension Estimation from Point Cloud Data"
+# Group Assignment 1: "Box Dimension Estimation from Point Cloud Data Using RANSAC Plane Fitting"
 
 ## description: 
   This assignment estimates the height, width, and length of a box using 3D point cloud
