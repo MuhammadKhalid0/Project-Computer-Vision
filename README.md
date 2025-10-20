@@ -18,7 +18,7 @@
     python starter.py <mat_path> [--example N] [--th_floor T1] [--th_top T2] [--max-itr M] [--save-viz]
 
   Example:
-    python starter.py Examples/example1kinect.mat --example 1 --th_floor 0.01 --th_top 0.01 --save-viz
+    python RANSAC_Box_Dimension_Estimation.py Examples/example1kinect.mat --example 1 --th_floor 0.01 --th_top 0.01 --save-viz
 
 ## arguments:
   mat_path: "Path to the .mat file containing amplitude, distance, and point cloud data"
