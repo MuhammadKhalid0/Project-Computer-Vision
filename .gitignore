@@ -2,3 +2,5 @@ venv/
 .venv/
 */venv/
 */.venv/
+*/vladenv/*
+icdar17_local_features/*
