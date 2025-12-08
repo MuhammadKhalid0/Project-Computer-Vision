@@ -4,3 +4,26 @@ venv/
 */.venv/
 */vladenv/*
 icdar17_local_features/*
+# Python cache
+__pycache__/
+*.pyc
+
+# Generated VLAD / model files
+enc_test.pkl.gz
+enc_train.pkl.gz
+mus.pkl.gz
+
+# Windows metadata
+*.Zone.Identifier
+
+# Dataset + extracted features
+icdar17_local_features.zip
+icdar17_local_features/
+
+# Virtual environment (if located one level up)
+../vladenv/
+vladenv/
+
+# General compressed files
+*.gz
+*.zip
