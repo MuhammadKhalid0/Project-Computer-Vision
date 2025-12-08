@@ -119,8 +119,14 @@ def dictionary(descriptors, n_clusters):
     returns: KxD matrix of K clusters
     """
     # TODO
-    dummy = np.array([42])
-    return dummy
+    kmeans = MiniBatchKMeans(
+        n_clusters=n_clusters,
+        batch_size=10000,
+        verbose=True
+    )
+    kmeans.fit(descriptors)
+    return kmeans.cluster_centers_
+
 def assignments(descriptors, clusters):
     """ 
     compute assignment matrix
@@ -131,10 +137,15 @@ def assignments(descriptors, clusters):
     """
     # compute nearest neighbors
     # TODO
+    matcher = cv2.BFMatcher(cv2.NORM_L2)
+    matches = matcher.knnMatch(descriptors, clusters, k=1) 
 
     # create hard assignment
     assignment = np.zeros( (len(descriptors), len(clusters)) )
     # TODO
+    for i, m in enumerate(matches):
+        k = m[0].trainIdx
+        assignment[i, k] = 1.0
 
     return assignment
 
@@ -163,14 +174,29 @@ def vlad(files, mus, powernorm, gmp=False, gamma=1000):
             # this cluster as nearest neighbor and then compute the 
             # difference to the cluster center than computing the differences
             # first and then select
+            mask = a[:, k] == 1
+            if not np.any(mask):
+                continue
+            diff = desc[mask] - mus[k]
+            encoding = diff.sum(axis=0)
+
+            start = k * D
+            end = (k + 1) * D
+            f_enc[start:end] = encoding
 
    
         # c) power normalization
         if powernorm:
             # TODO
+            f_enc = np.sign(f_enc) * np.sqrt(np.abs(f_enc))
 
         # l2 normalization
         # TODO
+        f_enc = normalize(f_enc.reshape(1, -1), norm='l2').flatten()
+
+        encodings.append(f_enc)
+
+    encodings = np.vstack(encodings)
 
 
     return encodings
@@ -190,12 +216,26 @@ def esvm(encs_test, encs_train, C=1000):
 
     # set up labels
     # TODO
-
+    M = encs_train.shape[0]
     def loop(i):
         # compute SVM 
         # and make feature transformation
         # TODO
-        return x
+        x_pos = encs_test[i:i+1]          
+        X = np.vstack([x_pos, encs_train])  
+        y = np.zeros(1 + M, dtype=int)
+        y[0] = 1  
+
+        clf = LinearSVC(C=C, class_weight='balanced')
+        clf.fit(X, y)
+
+        w = clf.coef_.astype(np.float32) 
+
+        w_norm = np.linalg.norm(w)
+        if w_norm > 0:
+            w = w / w_norm
+
+        return w
 
     # let's do that in parallel: 
     # if that doesn't work for you, just exchange 'parmap' with 'map'
@@ -218,6 +258,8 @@ def distances(encs):
     # compute cosine distance = 1 - dot product between l2-normalized
     # encodings
     # TODO
+    sims = np.dot(encs, encs.T).astype(np.float32)
+    dists = 1.0 - sims
     # mask out distance with itself
     np.fill_diagonal(dists, np.finfo(dists.dtype).max)
     return dists
@@ -265,11 +307,13 @@ if __name__ == '__main__':
     print('#train: {}'.format(len(files_train)))
     if not os.path.exists('mus.pkl.gz'):
         # TODO
+        descriptors = loadRandomDescriptors(files_train, max_descriptors=500000)
         print('> loaded {} descriptors:'.format(len(descriptors)))
 
         # cluster centers
         print('> compute dictionary')
         # TODO
+        mus = dictionary(descriptors, n_clusters=100)
         with gzip.open('mus.pkl.gz', 'wb') as fOut:
             cPickle.dump(mus, fOut, -1)
     else:
@@ -282,9 +326,19 @@ if __name__ == '__main__':
     files_test, labels_test = getFiles(args.in_test, args.suffix,
                                        args.labels_test)
     print('#test: {}'.format(len(files_test)))
+
+    gamma = args.gamma
     fname = 'enc_test_gmp{}.pkl.gz'.format(gamma) if args.gmp else 'enc_test.pkl.gz'
     if not os.path.exists(fname) or args.overwrite:
         # TODO
+        enc_test = vlad(files_test, mus, powernorm=args.powernorm,
+                        gmp=args.gmp, gamma=gamma)  
+        # ----------  evaluate without powernorm   ---------- 
+        print('> evaluate VLAD encodings without power normalization')  
+        enc_test_no_pnorm = vlad(files_test, mus, powernorm=False,
+                        gmp=args.gmp, gamma=gamma)  
+        evaluate(enc_test_no_pnorm, labels_test) 
+        # ------------------------------------------------------ 
         with gzip.open(fname, 'wb') as fOut:
             cPickle.dump(enc_test, fOut, -1)
     else:
@@ -292,14 +346,19 @@ if __name__ == '__main__':
             enc_test = cPickle.load(f)
    
     # cross-evaluate test encodings
-    print('> evaluate')
+    print('> evaluate VLAD encodings with power normalization')
     evaluate(enc_test, labels_test)
+
+    
+
 
     # d) compute exemplar svms
     print('> compute VLAD for train (for E-SVM)')
     fname = 'enc_train_gmp{}.pkl.gz'.format(gamma) if args.gmp else 'enc_train.pkl.gz'
     if not os.path.exists(fname) or args.overwrite:
         # TODO
+        enc_train = vlad(files_train, mus, powernorm=args.powernorm,
+                         gmp=args.gmp, gamma=gamma)
         with gzip.open(fname, 'wb') as fOut:
             cPickle.dump(enc_train, fOut, -1)
     else:
@@ -308,6 +367,7 @@ if __name__ == '__main__':
 
     print('> esvm computation')
     # TODO
+    enc_test = esvm(enc_test, enc_train, C=args.C)
 
     # eval
     evaluate(enc_test, labels_test)
