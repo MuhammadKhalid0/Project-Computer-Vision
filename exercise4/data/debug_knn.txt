@@ -1,0 +1,52 @@
+================================================================================
+DEBUG INFO - 2025-12-30 14:35:35
+================================================================================
+k (actual): 15
+Total gallery samples: 176
+Total gallery embeddings: 352
+
+Top k Nearest Neighbors (sorted by distance):
+--------------------------------------------------------------------------------
+Rank   Label                     Distance        Count     
+--------------------------------------------------------------------------------
+1      Muhammad_Omar             0.613813        1         
+2      Muhammad_Omar             0.620938        2         
+3      Muhammad_Omar             0.627690        3         
+4      Muhammad_Omar             0.641923        4         
+5      Muhammad_Omar             0.642073        5         
+6      Muhammad_Omar             0.644955        6         
+7      Muhammad_Omar             0.648140        7         
+8      Muhammad_Omar             0.650900        8         
+9      Muhammad_Omar             0.662319        9         
+10     Muhammad_Omar             0.666607        10        
+11     Muhammad_Omar             0.669266        11        
+12     Muhammad_Omar             0.670423        12        
+13     Muhammad_Omar             0.691140        13        
+14     Muhammad_Omar             0.709009        14        
+15     Muhammad_Omar             0.709861        15        
+
+Label Votes (for majority voting):
+--------------------------------------------------------------------------------
+  Muhammad_Omar: 15.000000000000004 votes
+
+Prediction Results:
+--------------------------------------------------------------------------------
+Predicted Label: Muhammad_Omar
+Posterior Probability: 1.000000 (100.00%)
+Distance to Predicted Class: 0.567220
+Max Distance Threshold: 2.0
+Min Probability Threshold: 0.0
+
+Neighbor Distribution:
+--------------------------------------------------------------------------------
+  Muhammad_Omar: 15/15 (100.0%)
+
+Distance Statistics:
+--------------------------------------------------------------------------------
+Min distance: 0.613813
+Max distance: 0.709861
+Mean distance: 0.657937
+Median distance: 0.650900
+Std deviation: 0.028093
+
+

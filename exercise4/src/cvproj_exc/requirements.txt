@@ -1,0 +1,5 @@
+matplotlib ~= 3.9
+mtcnn[tensorflow] >= 1.0.0
+opencv-python>=4.1
+pandas >= 2.1
+scikit-learn >= 1.4
