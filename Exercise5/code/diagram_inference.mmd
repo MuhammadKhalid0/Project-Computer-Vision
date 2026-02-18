@@ -1,0 +1,32 @@
+flowchart TD
+    A[Any input image<br/>arbitrary] --> B[5. detect.py<br/>Task 5.2.4]
+    
+    B --> C[Step 1: Selective Search<br/>→ region proposals]
+    C --> D[Step 2: ResNet18 features<br/>→ 512-dim per proposal]
+    D --> E[Step 3: SVM classification<br/>→ balloon / background]
+    E --> F[Step 4: Confidence filter<br/>→ keep score >= threshold]
+    F --> G[Step 5: NMS IoU=0.3<br/>→ remove duplicates]
+    G --> H[Step 6: Visualise<br/>→ red boxes + scores]
+    
+    H --> I[results/detection_name.png<br/>visualisation output]
+    
+    K[svm_model.joblib<br/>svm_scaler.joblib] -.->|load| B
+    
+    style A fill:#95A5A6,stroke:#2C3E50,stroke-width:2px
+    style B fill:#27AE60,stroke:#2C3E50,stroke-width:2px,color:#fff
+    style C fill:#E8F8F5,stroke:#27AE60,stroke-width:1.5px
+    style D fill:#E8F8F5,stroke:#27AE60,stroke-width:1.5px
+    style E fill:#E8F8F5,stroke:#27AE60,stroke-width:1.5px
+    style F fill:#E8F8F5,stroke:#27AE60,stroke-width:1.5px
+    style G fill:#E8F8F5,stroke:#27AE60,stroke-width:1.5px
+    style H fill:#E8F8F5,stroke:#27AE60,stroke-width:1.5px
+    style I fill:#F5F5DC,stroke:#8B8682,stroke-width:1.5px
+    style K fill:#F5F5DC,stroke:#8B8682,stroke-width:1.5px
+
+
+
+
+
+
+
+

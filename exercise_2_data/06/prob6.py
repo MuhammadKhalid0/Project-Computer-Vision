@@ -19,14 +19,17 @@ for idx, fname in enumerate(files):
         t = 0.8 * hdr_raw.max()
         print(f"base = {fname}, max={hdr_raw.max():.1f}, t={t:.1f}")
     else:
+        # Update threshold based on current HDR state
+        t = 0.8 * hdr_raw.max()
+        
         # exposures are halved each time->scale with 2^idx
         factor = 2**idx
         i_scaled = x*factor
-
+        
         mask = hdr_raw>t
         hdr_raw[mask] = i_scaled[mask]
-
-        print(f"added {fname}, factor={factor}, replaced={mask.sum()} px")
+        
+        print(f"added {fname}, factor={factor}, replaced={mask.sum()} px, t={t:.1f}")
 
 print("HDR combine done")
 X = hdr_raw
@@ -99,7 +102,7 @@ rgb_wb = apply_gray_world_white_balance(rgb)
 
 # log compress + map to 8bit
 
-eps=1e-8
+eps=1e-8 #avoid log(0)
 log_img = np.log(rgb_wb + eps)
 
 log_min = log_img.min()

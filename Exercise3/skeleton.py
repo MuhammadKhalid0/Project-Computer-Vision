@@ -11,6 +11,7 @@ from sklearn.cluster import MiniBatchKMeans
 from sklearn.svm import LinearSVC
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import normalize
+from sklearn.decomposition import PCA
 import numpy as np
 import cv2
 from parmap import parmap
@@ -37,6 +38,16 @@ def parseArgs(parser):
                         help='regularization parameter of GMP')
     parser.add_argument('--C', default=1000, type=float, 
                         help='C parameter of the SVM')
+    parser.add_argument('--multivlad', action='store_true',
+                        help='use multi-VLAD with 5 codebooks and PCA whitening')
+    parser.add_argument('--pca_components', default=1000, type=int,
+                        help='number of PCA components for multi-VLAD (default: 1000)')
+    parser.add_argument('--extract_sift', action='store_true',
+                        help='extract SIFT descriptors from images and save to output folders')
+    parser.add_argument('--output_train', default='icdar2017-sift-train',
+                        help='output folder for training descriptor pickle files')
+    parser.add_argument('--output_test', default='icdar2017-sift-test',
+                        help='output folder for test descriptor pickle files')
     return parser
 
 def getFiles(folder, pattern, labelfile):
@@ -74,6 +85,130 @@ def getFiles(folder, pattern, labelfile):
         labels.append(class_id)
 
     return all_files, labels
+
+def getImageFiles(folder, labelfile):
+    """
+    Get image files from labelfile, trying common image extensions
+    parameters:
+        folder: input folder
+        labelfile: contains a list of filename and labels
+    return: absolute filenames + labels
+    """
+    # read labelfile
+    with open(labelfile, 'r') as f:
+        all_lines = f.readlines()
+    
+    all_files = []
+    labels = []
+    for line in all_lines:
+        splits = shlex.split(line)
+        file_name = splits[0]
+        class_id = splits[1]
+
+        # strip all known endings
+        for p in ['.pkl.gz', '.txt', '.png', '.jpg', '.jpeg', '.tif', '.tiff', '.ocvmb','.csv']:
+            if file_name.endswith(p):
+                file_name = file_name.replace(p,'')
+
+        # Try to find image file with common extensions
+        found = False
+        for ext in ['.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp']:
+            img_file = os.path.join(folder, file_name + ext)
+            if os.path.exists(img_file):
+                all_files.append(img_file)
+                labels.append(class_id)
+                found = True
+                break
+        
+        if not found:
+            # If no image found, skip this entry
+            continue
+
+    return all_files, labels
+
+def computeDescs(filename):
+    """
+    compute SIFT descriptors from an image file
+    parameters:
+        filename: path to image file
+    returns: TxD matrix of descriptors (T descriptors of dimension D)
+    """
+    # Load image
+    img = cv2.imread(filename, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise ValueError(f"Could not load image: {filename}")
+    
+    # Create SIFT detector
+    sift = cv2.SIFT_create()
+    
+    # Detect keypoints
+    keypoints = sift.detect(img, None)
+    
+    # If no keypoints found, return empty array
+    if len(keypoints) == 0:
+        return np.array([]).reshape(0, 128)
+    
+    # Set all keypoint angles to 0
+    for kp in keypoints:
+        kp.angle = 0.0
+    
+    # Compute descriptors with modified keypoints (angle=0)
+    keypoints, descriptors = sift.compute(img, keypoints)
+    
+    # If no descriptors found, return empty array
+    if descriptors is None or len(descriptors) == 0:
+        return np.array([]).reshape(0, 128)
+    
+    # Apply Hellinger normalization:
+    # 1. L1 normalization (since SIFT descriptors are already L2 normalized)
+    descriptors = descriptors.astype(np.float32)
+    l1_norms = np.linalg.norm(descriptors, ord=1, axis=1, keepdims=True)
+    l1_norms[l1_norms == 0] = 1  # avoid division by zero
+    descriptors = descriptors / l1_norms
+    
+    # 2. Sign square root (no L2 normalization afterwards)
+    descriptors = np.sign(descriptors) * np.sqrt(np.abs(descriptors))
+    
+    return descriptors
+
+def extractAndSaveSIFT(image_files, output_folder, suffix='_SIFT_patch_pr.pkl.gz'):
+    """
+    Extract SIFT descriptors from images and save them to output folder
+    parameters:
+        image_files: list of image file paths
+        output_folder: folder to save descriptor files
+        suffix: suffix to append to base filename
+    """
+    # Create output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+    
+    for img_file in tqdm(image_files, desc='Extracting SIFT'):
+        # Check if it's an image file
+        is_image = any(img_file.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'])
+        
+        if not is_image:
+            continue
+        
+        # Get base filename without extension
+        base_name = os.path.basename(img_file)
+        for ext in ['.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp']:
+            if base_name.endswith(ext):
+                base_name = base_name[:-len(ext)]
+                break
+        
+        # Construct output filename
+        output_file = os.path.join(output_folder, base_name + suffix)
+        
+        # Skip if already exists
+        if os.path.exists(output_file):
+            continue
+        
+        # Compute descriptors
+        desc = computeDescs(img_file)
+        
+        # Save descriptors
+        with gzip.open(output_file, 'wb') as fOut:
+            cPickle.dump(desc, fOut, -1)
 
 def loadRandomDescriptors(files, max_descriptors):
     """ 
@@ -178,7 +313,43 @@ def vlad(files, mus, powernorm, gmp=False, gamma=1000):
             if not np.any(mask):
                 continue
             diff = desc[mask] - mus[k]
-            encoding = diff.sum(axis=0)
+            
+            if gmp:
+                # Generalized Max Pooling: use Ridge regression
+                # According to the formulation: ξ_gmp = argmin_ξ ||Φ^T ξ - 1_n||^2 + λ||ξ||^2
+                # Where Φ^T is the residual matrix R (T_k, D), ξ is the encoding (D,), 1_n is ones (T_k,)
+                # This is equivalent to Ridge regression: minimize ||R * ξ - 1_n||^2 + gamma * ||ξ||^2
+                num_assigned = len(diff)
+                
+                if num_assigned > 0:
+                    # Residuals R: shape (T_k, D) where each row is a residual vector
+                    R = diff  # shape: (T_k, D)
+                    
+                    # Handle edge case: if only one descriptor, use sum pooling
+                    if num_assigned == 1:
+                        encoding = R[0].astype(np.float32)
+                    else:
+                        # Target vector: ones of length T_k
+                        y = np.ones(num_assigned, dtype=np.float32)  # shape: (T_k,)
+                        
+                        # Ridge regression with sparse cg solver as specified
+                        # X = R (T_k, D), y = ones (T_k,)
+                        # This solves: minimize ||R * ξ - y||^2 + gamma * ||ξ||^2
+                        try:
+                            ridge = Ridge(alpha=gamma, fit_intercept=False, 
+                                         max_iter=500, solver='sparse_cg')
+                            ridge.fit(R, y)
+                            
+                            # Encoding is the coefficient vector
+                            encoding = ridge.coef_.astype(np.float32)
+                        except:
+                            # Fallback to sum pooling if Ridge fails
+                            encoding = diff.sum(axis=0).astype(np.float32)
+                else:
+                    encoding = np.zeros(D, dtype=np.float32)
+            else:
+                # Standard sum pooling
+                encoding = diff.sum(axis=0)
 
             start = k * D
             end = (k + 1) * D
@@ -200,6 +371,60 @@ def vlad(files, mus, powernorm, gmp=False, gamma=1000):
 
 
     return encodings
+
+def createMultipleCodebooks(files_train, n_codebooks=5, n_clusters=100, max_descriptors=500000):
+    """
+    Create multiple codebooks by running k-means with different seeds and descriptor subsets
+    parameters:
+        files_train: list of training files
+        n_codebooks: number of codebooks to create (default: 5)
+        n_clusters: number of clusters per codebook
+        max_descriptors: maximum descriptors to use per codebook
+    returns: list of codebooks (each is KxD matrix)
+    """
+    codebooks = []
+    for i in range(n_codebooks):
+        print('> creating codebook {}/{}'.format(i+1, n_codebooks))
+        # Use different random seed for each codebook
+        np.random.seed(42 + i)
+        
+        # Load different random subset of descriptors
+        descriptors = loadRandomDescriptors(files_train, max_descriptors=max_descriptors)
+        print('> loaded {} descriptors for codebook {}'.format(len(descriptors), i+1))
+        
+        # Create codebook with different seed
+        kmeans = MiniBatchKMeans(
+            n_clusters=n_clusters,
+            batch_size=10000,
+            random_state=42 + i,
+            verbose=True
+        )
+        kmeans.fit(descriptors)
+        codebooks.append(kmeans.cluster_centers_)
+    
+    return codebooks
+
+def multivlad(files, codebooks, powernorm, gmp=False, gamma=1000):
+    """
+    Compute multi-VLAD encoding using multiple codebooks
+    parameters:
+        files: list of N files
+        codebooks: list of K codebooks (each is KxD matrix)
+        powernorm: whether to apply power normalization
+        gmp: whether to use generalized max pooling
+        gamma: GMP regularization parameter
+    returns: Nx(5*K*D) matrix of concatenated VLAD encodings
+    """
+    all_encodings = []
+    
+    for i, mus in enumerate(codebooks):
+        print('> computing VLAD with codebook {}/{}'.format(i+1, len(codebooks)))
+        enc = vlad(files, mus, powernorm=powernorm, gmp=gmp, gamma=gamma)
+        all_encodings.append(enc)
+    
+    # Concatenate along feature dimension (axis=1)
+    multivlad_enc = np.hstack(all_encodings)
+    return multivlad_enc
 
 def esvm(encs_test, encs_train, C=1000):
     """ 
@@ -300,25 +525,64 @@ if __name__ == '__main__':
     parser = parseArgs(parser)
     args = parser.parse_args()
     np.random.seed(42) # fix random seed
+    
+    # If --extract_sift is set, extract descriptors and save them
+    if args.extract_sift:
+        print('> Extracting SIFT descriptors...')
+        # Get image files for train and test (original images, not descriptors)
+        train_images, _ = getImageFiles(args.in_train, args.labels_train)
+        test_images, _ = getImageFiles(args.in_test, args.labels_test)
+        
+        # Use descriptor suffix for saving (default to _SIFT_patch_pr.pkl.gz)
+        desc_suffix = args.suffix
+        if desc_suffix in ['.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp']:
+            # If suffix is an image extension, use default descriptor suffix
+            desc_suffix = '_SIFT_patch_pr.pkl.gz'
+        
+        # Extract and save SIFT descriptors
+        print('> Extracting SIFT for training images...')
+        extractAndSaveSIFT(train_images, args.output_train, suffix=desc_suffix)
+        print('> Extracting SIFT for test images...')
+        extractAndSaveSIFT(test_images, args.output_test, suffix=desc_suffix)
+        
+        # Update input folders and suffix to use the extracted descriptors
+        args.in_train = args.output_train
+        args.in_test = args.output_test
+        args.suffix = desc_suffix
    
     # a) dictionary
     files_train, labels_train = getFiles(args.in_train, args.suffix,
                                          args.labels_train)
     print('#train: {}'.format(len(files_train)))
-    if not os.path.exists('mus.pkl.gz'):
-        # TODO
-        descriptors = loadRandomDescriptors(files_train, max_descriptors=500000)
-        print('> loaded {} descriptors:'.format(len(descriptors)))
-
-        # cluster centers
-        print('> compute dictionary')
-        # TODO
-        mus = dictionary(descriptors, n_clusters=100)
-        with gzip.open('mus.pkl.gz', 'wb') as fOut:
-            cPickle.dump(mus, fOut, -1)
+    
+    if args.multivlad:
+        # g) Multi-VLAD: create 5 codebooks with different seeds
+        codebooks_fname = 'codebooks_multivlad.pkl.gz'
+        if not os.path.exists(codebooks_fname) or args.overwrite:
+            codebooks = createMultipleCodebooks(files_train, n_codebooks=5, 
+                                               n_clusters=100, max_descriptors=500000)
+            with gzip.open(codebooks_fname, 'wb') as fOut:
+                cPickle.dump(codebooks, fOut, -1)
+        else:
+            with gzip.open(codebooks_fname, 'rb') as f:
+                codebooks = cPickle.load(f)
+        mus = codebooks[0]  # Use first codebook for compatibility
     else:
-        with gzip.open('mus.pkl.gz', 'rb') as f:
-            mus = cPickle.load(f)
+        # Regular single codebook
+        if not os.path.exists('mus.pkl.gz') or args.overwrite:
+            # TODO
+            descriptors = loadRandomDescriptors(files_train, max_descriptors=500000)
+            print('> loaded {} descriptors:'.format(len(descriptors)))
+
+            # cluster centers
+            print('> compute dictionary')
+            # TODO
+            mus = dictionary(descriptors, n_clusters=100)
+            with gzip.open('mus.pkl.gz', 'wb') as fOut:
+                cPickle.dump(mus, fOut, -1)
+        else:
+            with gzip.open('mus.pkl.gz', 'rb') as f:
+                mus = cPickle.load(f)
 
   
     # b) VLAD encoding
@@ -328,47 +592,119 @@ if __name__ == '__main__':
     print('#test: {}'.format(len(files_test)))
 
     gamma = args.gamma
-    fname = 'enc_test_gmp{}.pkl.gz'.format(gamma) if args.gmp else 'enc_test.pkl.gz'
-    if not os.path.exists(fname) or args.overwrite:
-        # TODO
-        enc_test = vlad(files_test, mus, powernorm=args.powernorm,
-                        gmp=args.gmp, gamma=gamma)  
-        # ----------  evaluate without powernorm   ---------- 
-        print('> evaluate VLAD encodings without power normalization')  
-        enc_test_no_pnorm = vlad(files_test, mus, powernorm=False,
-                        gmp=args.gmp, gamma=gamma)  
-        evaluate(enc_test_no_pnorm, labels_test) 
-        # ------------------------------------------------------ 
-        with gzip.open(fname, 'wb') as fOut:
-            cPickle.dump(enc_test, fOut, -1)
+    
+    if args.multivlad:
+        # g) Multi-VLAD with PCA whitening
+        print('> compute multi-VLAD for test')
+        multivlad_test_fname = 'enc_test_multivlad_gmp{}.pkl.gz'.format(gamma) if args.gmp else 'enc_test_multivlad.pkl.gz'
+        
+        if not os.path.exists(multivlad_test_fname) or args.overwrite:
+            # Compute multi-VLAD encodings
+            enc_test_multivlad = multivlad(files_test, codebooks, 
+                                          powernorm=args.powernorm,
+                                          gmp=args.gmp, gamma=gamma)
+            print('> multi-VLAD shape before PCA: {}'.format(enc_test_multivlad.shape))
+            
+            # Compute multi-VLAD for training set
+            print('> compute multi-VLAD for train')
+            enc_train_multivlad = multivlad(files_train, codebooks,
+                                           powernorm=args.powernorm,
+                                           gmp=args.gmp, gamma=gamma)
+            print('> multi-VLAD train shape before PCA: {}'.format(enc_train_multivlad.shape))
+            
+            # Train PCA on training set (or subset)
+            print('> training PCA with whitening')
+            n_components = min(args.pca_components, len(files_train))
+            pca = PCA(n_components=n_components, whiten=True)
+            pca.fit(enc_train_multivlad)
+            
+            # Apply PCA to both train and test
+            enc_train_multivlad = pca.transform(enc_train_multivlad)
+            enc_test_multivlad = pca.transform(enc_test_multivlad)
+            print('> multi-VLAD shape after PCA: {}'.format(enc_test_multivlad.shape))
+            
+            # Save PCA model and encodings
+            with gzip.open('pca_multivlad.pkl.gz', 'wb') as fOut:
+                cPickle.dump(pca, fOut, -1)
+            with gzip.open(multivlad_test_fname, 'wb') as fOut:
+                cPickle.dump(enc_test_multivlad, fOut, -1)
+            with gzip.open('enc_train_multivlad_gmp{}.pkl.gz'.format(gamma) if args.gmp else 'enc_train_multivlad.pkl.gz', 'wb') as fOut:
+                cPickle.dump(enc_train_multivlad, fOut, -1)
+        else:
+            with gzip.open(multivlad_test_fname, 'rb') as f:
+                enc_test_multivlad = cPickle.load(f)
+            with gzip.open('pca_multivlad.pkl.gz', 'rb') as f:
+                pca = cPickle.load(f)
+        
+        enc_test = enc_test_multivlad
+        print('> evaluate multi-VLAD encodings')
+        evaluate(enc_test, labels_test)
     else:
-        with gzip.open(fname, 'rb') as f:
-            enc_test = cPickle.load(f)
-   
-    # cross-evaluate test encodings
-    print('> evaluate VLAD encodings with power normalization')
-    evaluate(enc_test, labels_test)
+        # Regular single VLAD
+        fname = 'enc_test_gmp{}.pkl.gz'.format(gamma) if args.gmp else 'enc_test.pkl.gz'
+        if not os.path.exists(fname) or args.overwrite:
+            # TODO
+            enc_test = vlad(files_test, mus, powernorm=args.powernorm,
+                            gmp=args.gmp, gamma=gamma)  
+            # ----------  evaluate without powernorm   ---------- 
+            print('> evaluate VLAD encodings without power normalization')  
+            enc_test_no_pnorm = vlad(files_test, mus, powernorm=False,
+                            gmp=args.gmp, gamma=gamma)  
+            evaluate(enc_test_no_pnorm, labels_test) 
+            # ------------------------------------------------------ 
+            with gzip.open(fname, 'wb') as fOut:
+                cPickle.dump(enc_test, fOut, -1)
+        else:
+            with gzip.open(fname, 'rb') as f:
+                enc_test = cPickle.load(f)
+       
+        # cross-evaluate test encodings
+        print('> evaluate VLAD encodings with power normalization')
+        evaluate(enc_test, labels_test)
 
     
 
 
     # d) compute exemplar svms
-    print('> compute VLAD for train (for E-SVM)')
-    fname = 'enc_train_gmp{}.pkl.gz'.format(gamma) if args.gmp else 'enc_train.pkl.gz'
-    if not os.path.exists(fname) or args.overwrite:
-        # TODO
-        enc_train = vlad(files_train, mus, powernorm=args.powernorm,
-                         gmp=args.gmp, gamma=gamma)
-        with gzip.open(fname, 'wb') as fOut:
-            cPickle.dump(enc_train, fOut, -1)
+    if not args.multivlad:
+        # Regular VLAD: compute training encodings for E-SVM
+        print('> compute VLAD for train (for E-SVM)')
+        fname = 'enc_train_gmp{}.pkl.gz'.format(gamma) if args.gmp else 'enc_train.pkl.gz'
+        if not os.path.exists(fname) or args.overwrite:
+            # TODO
+            enc_train = vlad(files_train, mus, powernorm=args.powernorm,
+                             gmp=args.gmp, gamma=gamma)
+            with gzip.open(fname, 'wb') as fOut:
+                cPickle.dump(enc_train, fOut, -1)
+        else:
+            with gzip.open(fname, 'rb') as f:
+                enc_train = cPickle.load(f)
     else:
-        with gzip.open(fname, 'rb') as f:
-            enc_train = cPickle.load(f)
+        # Multi-VLAD: load training encodings (already computed with PCA)
+        multivlad_train_fname = 'enc_train_multivlad_gmp{}.pkl.gz'.format(gamma) if args.gmp else 'enc_train_multivlad.pkl.gz'
+        if os.path.exists(multivlad_train_fname):
+            with gzip.open(multivlad_train_fname, 'rb') as f:
+                enc_train = cPickle.load(f)
+        else:
+            # Should have been computed above, but just in case
+            print('> compute multi-VLAD for train (for E-SVM)')
+            enc_train_multivlad = multivlad(files_train, codebooks,
+                                           powernorm=args.powernorm,
+                                           gmp=args.gmp, gamma=gamma)
+            with gzip.open('pca_multivlad.pkl.gz', 'rb') as f:
+                pca = cPickle.load(f)
+            enc_train = pca.transform(enc_train_multivlad)
+            with gzip.open(multivlad_train_fname, 'wb') as fOut:
+                cPickle.dump(enc_train, fOut, -1)
 
     print('> esvm computation')
     # TODO
     enc_test = esvm(enc_test, enc_train, C=args.C)
 
     # eval
+    if args.multivlad:
+        print('> evaluate multi-VLAD with exemplar classifiers')
+    else:
+        print('> evaluate VLAD with exemplar classifiers')
     evaluate(enc_test, labels_test)
     print('> evaluate')

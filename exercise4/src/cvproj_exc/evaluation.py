@@ -103,4 +103,4 @@ class OpenSetEvaluation:
         
         # At rank 1, check if predicted label matches true label (only for accepted predictions)
         total_correct = np.sum(accepted_predictions == accepted_test_labels)
-        return total_correct / len(accepted_test_labels)
+        return total_correct / len(known_test_labels)

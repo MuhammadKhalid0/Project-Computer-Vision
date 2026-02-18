@@ -23,9 +23,9 @@ def process_raw(input_path, output_jpg_path):
     """
     with rawpy.imread(input_path) as raw:
         rgb8 = raw.postprocess(
-            demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,   # or DCB
+            demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,   # or DCB/ Adaptive Homogeneity-Directed demosaicing
             use_camera_wb=True,                              # camera WB
-            no_auto_bright=False,                            # let it set brightness
+            no_auto_bright=False,                            # let it set brightness/ automatic brightness adjustment.
             output_bps=8,                                    # 8-bit sRGB
             output_color=rawpy.ColorSpace.sRGB               # standard colour space
             # gamma left as default (2.222, 4.5)

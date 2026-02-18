@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Balloon Detection Pipeline Diagrams</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1 {
+            text-align: center;
+            color: #2C3E50;
+        }
+        h2 {
+            color: #2C3E50;
+            border-bottom: 3px solid;
+            padding-bottom: 10px;
+        }
+        .diagram-container {
+            background: white;
+            padding: 20px;
+            margin: 30px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .mermaid {
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <h1>Balloon Detection Pipeline — Exercise 5.2</h1>
+    
+    <div class="diagram-container">
+        <h2 style="border-color: #E74C3C;">Training Phase</h2>
+        <div class="mermaid">
+flowchart TD
+    A[balloon_dataset/<br/>train/valid/test<br/>images + annotations] --> B[selective_search.py<br/>Exercise 5.1<br/>Felzenszwalb + hierarchical grouping]
+    B --> C[1. generate_proposals.py<br/>Task 5.2.1<br/>• Selective Search scale=500<br/>• Deduplicate boxes<br/>• Save to JSON]
+    C --> D[proposals_train.json<br/>proposals_valid.json<br/>proposals_test.json]
+    
+    D --> E[tune_thresholds.py<br/>Task 5.2.2 tuning<br/>• Sweep tp, tn values<br/>• Score: GT Recall, IoU, #pos<br/>• Recommend best thresholds]
+    D --> F[2. create_samples.py<br/>Task 5.2.2<br/>• Load proposals + GT<br/>• Compute IoU<br/>• Label: IoU >= tp → positive<br/>  IoU <= tn → negative<br/>tp=0.4, tn=0.1]
+    E -.->|recommends| F
+    
+    F --> G[samples_train.json<br/>samples_valid.json<br/>filename, box, label, IoU]
+    
+    G --> H[3. extract_features.py<br/>Task 5.2.2 features<br/>• Crop proposal regions<br/>• Resize to 224×224<br/>• Pre-trained ResNet18 no FC<br/>• Output: 512-dim features<br/>• Batch inference batch=32]
+    
+    H --> I[features_train.npz<br/>features_valid.npz<br/>6777×512    2183×512]
+    
+    I --> J[4. train_svm.py<br/>Task 5.2.3<br/>• StandardScaler fit on train<br/>• SVM: RBF kernel, C=1.0<br/>• class_weight='balanced'<br/>• probability=True<br/>• Val: P=1.00, R=0.61, F1=0.76]
+    
+    J --> K[svm_model.joblib<br/>svm_scaler.joblib]
+    
+    style A fill:#95A5A6,stroke:#2C3E50,stroke-width:2px
+    style B fill:#E67E22,stroke:#2C3E50,stroke-width:2px
+    style C fill:#3498DB,stroke:#2C3E50,stroke-width:2px,color:#fff
+    style D fill:#F5F5DC,stroke:#8B8682,stroke-width:1.5px
+    style E fill:#E67E22,stroke:#2C3E50,stroke-width:2px,color:#fff
+    style F fill:#3498DB,stroke:#2C3E50,stroke-width:2px,color:#fff
+    style G fill:#F5F5DC,stroke:#8B8682,stroke-width:1.5px
+    style H fill:#3498DB,stroke:#2C3E50,stroke-width:2px,color:#fff
+    style I fill:#F5F5DC,stroke:#8B8682,stroke-width:1.5px
+    style J fill:#3498DB,stroke:#2C3E50,stroke-width:2px,color:#fff
+    style K fill:#F5F5DC,stroke:#8B8682,stroke-width:1.5px
+        </div>
+    </div>
+    
+    <div class="diagram-container">
+        <h2 style="border-color: #27AE60;">Inference Phase</h2>
+        <div class="mermaid">
+flowchart TD
+    A[Any input image<br/>arbitrary] --> B[5. detect.py<br/>Task 5.2.4]
+    
+    B --> C[Step 1: Selective Search<br/>→ region proposals]
+    C --> D[Step 2: ResNet18 features<br/>→ 512-dim per proposal]
+    D --> E[Step 3: SVM classification<br/>→ balloon / background]
+    E --> F[Step 4: Confidence filter<br/>→ keep score >= threshold]
+    F --> G[Step 5: NMS IoU=0.3<br/>→ remove duplicates]
+    G --> H[Step 6: Visualise<br/>→ red boxes + scores]
+    
+    H --> I[results/detection_name.png<br/>visualisation output]
+    
+    K[svm_model.joblib<br/>svm_scaler.joblib] -.->|load| B
+    
+    style A fill:#95A5A6,stroke:#2C3E50,stroke-width:2px
+    style B fill:#27AE60,stroke:#2C3E50,stroke-width:2px,color:#fff
+    style C fill:#E8F8F5,stroke:#27AE60,stroke-width:1.5px
+    style D fill:#E8F8F5,stroke:#27AE60,stroke-width:1.5px
+    style E fill:#E8F8F5,stroke:#27AE60,stroke-width:1.5px
+    style F fill:#E8F8F5,stroke:#27AE60,stroke-width:1.5px
+    style G fill:#E8F8F5,stroke:#27AE60,stroke-width:1.5px
+    style H fill:#E8F8F5,stroke:#27AE60,stroke-width:1.5px
+    style I fill:#F5F5DC,stroke:#8B8682,stroke-width:1.5px
+    style K fill:#F5F5DC,stroke:#8B8682,stroke-width:1.5px
+        </div>
+    </div>
+    
+    <div class="diagram-container">
+        <h2 style="border-color: #8E44AD;">Evaluation Phase</h2>
+        <div class="mermaid">
+flowchart TD
+    A[test/ images<br/>+ GT annotations] --> B[6. evaluate.py<br/>Task 5.2.5]
+    C[proposals_test.json] --> B
+    D[svm_model.joblib<br/>svm_scaler.joblib] --> B
+    
+    B --> E[MABO Metric<br/>Proposal Quality<br/>• For each GT box, find<br/>  best-overlapping proposal<br/>• MABO = mean best overlaps<br/>Result: 0.537]
+    
+    B --> F[COCO mAP Metric<br/>Detection Quality<br/>• Run full pipeline on test<br/>• pycocotools COCOeval<br/>• AP@.50 = 0.451<br/>• AP@[.50:.95] = 0.070]
+    
+    B --> G[Save visualisations<br/>red = detected<br/>green = GT]
+    
+    E --> H[results/eval_detections/*.png<br/>results/coco_detections_test.json]
+    F --> H
+    G --> H
+    
+    style A fill:#95A5A6,stroke:#2C3E50,stroke-width:2px
+    style B fill:#8E44AD,stroke:#2C3E50,stroke-width:2px,color:#fff
+    style C fill:#F5F5DC,stroke:#8B8682,stroke-width:1.5px
+    style D fill:#F5F5DC,stroke:#8B8682,stroke-width:1.5px
+    style E fill:#E8DAEF,stroke:#8E44AD,stroke-width:1.5px
+    style F fill:#E8DAEF,stroke:#8E44AD,stroke-width:1.5px
+    style G fill:#E8DAEF,stroke:#8E44AD,stroke-width:1.5px
+    style H fill:#F5F5DC,stroke:#8B8682,stroke-width:1.5px
+        </div>
+    </div>
+    
+    <script>
+        mermaid.initialize({ startOnLoad: true, theme: 'default' });
+    </script>
+</body>
+</html>
+
+
+
+
+
+
+
+

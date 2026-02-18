@@ -1,0 +1,31 @@
+flowchart TD
+    A[test/ images<br/>+ GT annotations] --> B[6. evaluate.py<br/>Task 5.2.5]
+    C[proposals_test.json] --> B
+    D[svm_model.joblib<br/>svm_scaler.joblib] --> B
+    
+    B --> E[MABO Metric<br/>Proposal Quality<br/>• For each GT box, find<br/>  best-overlapping proposal<br/>• MABO = mean best overlaps<br/>Result: 0.537]
+    
+    B --> F[COCO mAP Metric<br/>Detection Quality<br/>• Run full pipeline on test<br/>• pycocotools COCOeval<br/>• AP@.50 = 0.451<br/>• AP@[.50:.95] = 0.070]
+    
+    B --> G[Save visualisations<br/>red = detected<br/>green = GT]
+    
+    E --> H[results/eval_detections/*.png<br/>results/coco_detections_test.json]
+    F --> H
+    G --> H
+    
+    style A fill:#95A5A6,stroke:#2C3E50,stroke-width:2px
+    style B fill:#8E44AD,stroke:#2C3E50,stroke-width:2px,color:#fff
+    style C fill:#F5F5DC,stroke:#8B8682,stroke-width:1.5px
+    style D fill:#F5F5DC,stroke:#8B8682,stroke-width:1.5px
+    style E fill:#E8DAEF,stroke:#8E44AD,stroke-width:1.5px
+    style F fill:#E8DAEF,stroke:#8E44AD,stroke-width:1.5px
+    style G fill:#E8DAEF,stroke:#8E44AD,stroke-width:1.5px
+    style H fill:#F5F5DC,stroke:#8B8682,stroke-width:1.5px
+
+
+
+
+
+
+
+

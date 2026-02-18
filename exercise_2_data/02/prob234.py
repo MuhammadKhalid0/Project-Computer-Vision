@@ -3,7 +3,7 @@ import rawpy
 from scipy.signal import convolve2d
 import imageio.v2 as imageio
 
-## Problem 2
+## Problem 2w
 def reconstruct_channel(Mc, X, K):
     num = convolve2d(Mc * X, K, mode='same', boundary='symm')
     den = convolve2d(Mc,      K, mode='same', boundary='symm')

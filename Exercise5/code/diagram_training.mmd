@@ -1,0 +1,38 @@
+flowchart TD
+    A[balloon_dataset/<br/>train/valid/test<br/>images + annotations] --> B[selective_search.py<br/>Exercise 5.1<br/>Felzenszwalb + hierarchical grouping]
+    B --> C[1. generate_proposals.py<br/>Task 5.2.1<br/>• Selective Search scale=500<br/>• Deduplicate boxes<br/>• Save to JSON]
+    C --> D[proposals_train.json<br/>proposals_valid.json<br/>proposals_test.json]
+    
+    D --> E[tune_thresholds.py<br/>Task 5.2.2 tuning<br/>• Sweep tp, tn values<br/>• Score: GT Recall, IoU, #pos<br/>• Recommend best thresholds]
+    D --> F[2. create_samples.py<br/>Task 5.2.2<br/>• Load proposals + GT<br/>• Compute IoU<br/>• Label: IoU >= tp → positive<br/>  IoU <= tn → negative<br/>tp=0.4, tn=0.1]
+    E -.->|recommends| F
+    
+    F --> G[samples_train.json<br/>samples_valid.json<br/>filename, box, label, IoU]
+    
+    G --> H[3. extract_features.py<br/>Task 5.2.2 features<br/>• Crop proposal regions<br/>• Resize to 224×224<br/>• Pre-trained ResNet18 no FC<br/>• Output: 512-dim features<br/>• Batch inference batch=32]
+    
+    H --> I[features_train.npz<br/>features_valid.npz<br/>6777×512    2183×512]
+    
+    I --> J[4. train_svm.py<br/>Task 5.2.3<br/>• StandardScaler fit on train<br/>• SVM: RBF kernel, C=1.0<br/>• class_weight='balanced'<br/>• probability=True<br/>• Val: P=1.00, R=0.61, F1=0.76]
+    
+    J --> K[svm_model.joblib<br/>svm_scaler.joblib]
+    
+    style A fill:#95A5A6,stroke:#2C3E50,stroke-width:2px
+    style B fill:#E67E22,stroke:#2C3E50,stroke-width:2px
+    style C fill:#3498DB,stroke:#2C3E50,stroke-width:2px,color:#fff
+    style D fill:#F5F5DC,stroke:#8B8682,stroke-width:1.5px
+    style E fill:#E67E22,stroke:#2C3E50,stroke-width:2px,color:#fff
+    style F fill:#3498DB,stroke:#2C3E50,stroke-width:2px,color:#fff
+    style G fill:#F5F5DC,stroke:#8B8682,stroke-width:1.5px
+    style H fill:#3498DB,stroke:#2C3E50,stroke-width:2px,color:#fff
+    style I fill:#F5F5DC,stroke:#8B8682,stroke-width:1.5px
+    style J fill:#3498DB,stroke:#2C3E50,stroke-width:2px,color:#fff
+    style K fill:#F5F5DC,stroke:#8B8682,stroke-width:1.5px
+
+
+
+
+
+
+
+

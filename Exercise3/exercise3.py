@@ -37,6 +37,8 @@ def parseArgs(parser):
                         help='regularization parameter of GMP')
     parser.add_argument('--C', default=1000, type=float, 
                         help='C parameter of the SVM')
+    parser.add_argument('--extract-sift', action='store_true',
+                        help='extract SIFT descriptors and save to icdar2017-sift-test and icdar2017-sift-train folders')
     return parser
 
 def getFiles(folder, pattern, labelfile):
@@ -64,28 +66,163 @@ def getFiles(folder, pattern, labelfile):
 
         # strip all known endings, note: os.path.splitext() doesnt work for
         # '.' in the filenames, so let's do it this way...
-        for p in ['.pkl.gz', '.txt', '.png', '.jpg', '.tif', '.ocvmb','.csv']:
+        for p in ['.pkl.gz', '.txt', '.png', '.jpg', '.jpeg', '.tif', '.tiff', '.ocvmb','.csv']:
             if file_name.endswith(p):
                 file_name = file_name.replace(p,'')
 
         # get now new file name
         true_file_name = os.path.join(folder, file_name + pattern)
+        
+        # If file doesn't exist with the specified pattern, try common image extensions
+        # This handles cases where train uses .png and test uses .jpg
+        if not os.path.exists(true_file_name) and pattern in ['.png', '.jpg', '.jpeg']:
+            # Try alternative image extensions
+            for ext in ['.png', '.jpg', '.jpeg', '.tif', '.tiff']:
+                alt_file = os.path.join(folder, file_name + ext)
+                if os.path.exists(alt_file):
+                    true_file_name = alt_file
+                    break
+        
         all_files.append(true_file_name)
         labels.append(class_id)
 
     return all_files, labels
 
+def getImageFiles(folder, labelfile):
+    """
+    Get image files from labelfile, trying common image extensions
+    parameters:
+        folder: input folder
+        labelfile: contains a list of filename and labels
+    return: absolute filenames + labels
+    """
+    # read labelfile
+    with open(labelfile, 'r') as f:
+        all_lines = f.readlines()
+    
+    all_files = []
+    labels = []
+    for line in all_lines:
+        splits = shlex.split(line)
+        file_name = splits[0]
+        class_id = splits[1]
+
+        # strip all known endings
+        for p in ['.pkl.gz', '.txt', '.png', '.jpg', '.jpeg', '.tif', '.tiff', '.ocvmb','.csv']:
+            if file_name.endswith(p):
+                file_name = file_name.replace(p,'')
+
+        # Try to find image file with common extensions
+        found = False
+        for ext in ['.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp']:
+            img_file = os.path.join(folder, file_name + ext)
+            if os.path.exists(img_file):
+                all_files.append(img_file)
+                labels.append(class_id)
+                found = True
+                break
+        
+        if not found:
+            # If no image found, skip this entry
+            continue
+
+    return all_files, labels
+
+def computeDescs(filename):
+    """
+    compute SIFT descriptors from an image file
+    parameters:
+        filename: path to image file
+    returns: TxD matrix of descriptors (T descriptors of dimension D)
+    """
+    # Load image
+    img = cv2.imread(filename, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise ValueError(f"Could not load image: {filename}")
+    
+    # Create SIFT detector
+    sift = cv2.SIFT_create()
+    
+    # Detect keypoints
+    keypoints = sift.detect(img, None)
+    
+    # If no keypoints found, return empty array
+    if len(keypoints) == 0:
+        return np.array([]).reshape(0, 128)
+    
+    # Set all keypoint angles to 0
+    for kp in keypoints:
+        kp.angle = 0.0
+    
+    # Compute descriptors with modified keypoints (angle=0)
+    keypoints, descriptors = sift.compute(img, keypoints)
+    
+    # If no descriptors found, return empty array
+    if descriptors is None or len(descriptors) == 0:
+        return np.array([]).reshape(0, 128)
+    
+    # Apply Hellinger normalization:
+    # 1. L1 normalization (since SIFT descriptors are already L2 normalized)
+    descriptors = descriptors.astype(np.float32)
+    l1_norms = np.linalg.norm(descriptors, ord=1, axis=1, keepdims=True)
+    l1_norms[l1_norms == 0] = 1  # avoid division by zero
+    descriptors = descriptors / l1_norms
+    
+    # 2. Sign square root (no L2 normalization afterwards)
+    descriptors = np.sign(descriptors) * np.sqrt(np.abs(descriptors))
+    
+    return descriptors
+
+def extractAndSaveSIFT(image_files, output_folder, suffix='_SIFT_patch_pr.pkl.gz'):
+    """
+    Extract SIFT descriptors from images and save them to output folder
+    parameters:
+        image_files: list of image file paths
+        output_folder: folder to save descriptor files
+        suffix: suffix to append to base filename
+    """
+    # Create output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+    
+    for img_file in tqdm(image_files, desc='Extracting SIFT'):
+        # Check if it's an image file
+        is_image = any(img_file.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'])
+        
+        if not is_image:
+            continue
+        
+        # Get base filename without extension
+        base_name = os.path.basename(img_file)
+        for ext in ['.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp']:
+            if base_name.endswith(ext):
+                base_name = base_name[:-len(ext)]
+                break
+        
+        # Construct output filename
+        output_file = os.path.join(output_folder, base_name + suffix)
+        
+        # Skip if already exists
+        if os.path.exists(output_file):
+            continue
+        
+        # Compute descriptors
+        desc = computeDescs(img_file)
+        
+        # Save descriptors
+        with gzip.open(output_file, 'wb') as fOut:
+            cPickle.dump(desc, fOut, -1)
+
 def loadRandomDescriptors(files, max_descriptors):
     """ 
     load roughly `max_descriptors` random descriptors
     parameters:
-        files: list of filenames containing local features of dimension D
+        files: list of filenames containing local features of dimension D (or image files)
         max_descriptors: maximum number of descriptors (Q)
     returns: QxD matrix of descriptors
     """
     # let's just take 100 files to speed-up the process
     max_files = 100
-    indices = np.random.permutation(max_files)
+    indices = np.random.permutation(min(max_files, len(files)))
     files = np.array(files)[indices]
    
     # rough number of descriptors per file that we have to load
@@ -93,11 +230,23 @@ def loadRandomDescriptors(files, max_descriptors):
 
     descriptors = []
     for i in tqdm(range(len(files))):
-        with gzip.open(files[i], 'rb') as ff:
-            # for python2
-            # desc = cPickle.load(ff)
-            # for python3
-            desc = cPickle.load(ff, encoding='latin1')
+        # Check if file is an image file or pickle file
+        is_image = any(files[i].endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'])
+        
+        if is_image:
+            # Compute descriptors from image
+            desc = computeDescs(files[i])
+        else:
+            # Load from pickle file
+            with gzip.open(files[i], 'rb') as ff:
+                # for python2
+                # desc = cPickle.load(ff)
+                # for python3
+                desc = cPickle.load(ff, encoding='latin1')
+        
+        # Skip if no descriptors found
+        if len(desc) == 0:
+            continue
             
         # get some random ones
         indices = np.random.choice(len(desc),
@@ -106,6 +255,9 @@ def loadRandomDescriptors(files, max_descriptors):
                                    replace=False)
         desc = desc[ indices ]
         descriptors.append(desc)
+    
+    if len(descriptors) == 0:
+        raise ValueError("No descriptors found in any files")
     
     descriptors = np.concatenate(descriptors, axis=0)
     return descriptors
@@ -154,7 +306,7 @@ def vlad(files, mus, powernorm, gmp=False, gamma=1000):
     compute VLAD encoding for each files
     parameters: 
         files: list of N files containing each T local descriptors of dimension
-        D
+        D (or image files)
         mus: KxD matrix of cluster centers
         gmp: if set to True use generalized max pooling instead of sum pooling
     returns: NxK*D matrix of encodings
@@ -163,8 +315,28 @@ def vlad(files, mus, powernorm, gmp=False, gamma=1000):
     encodings = []
 
     for f in tqdm(files):
-        with gzip.open(f, 'rb') as ff:
-            desc = cPickle.load(ff, encoding='latin1')
+        # Check if file is an image file or pickle file
+        is_image = any(f.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'])
+        
+        if is_image:
+            # Compute descriptors from image
+            desc = computeDescs(f)
+        else:
+            # Load from pickle file
+            with gzip.open(f, 'rb') as ff:
+                desc = cPickle.load(ff, encoding='latin1')
+        
+        # Skip if no descriptors found
+        if len(desc) == 0:
+            # Create zero encoding
+            D = mus.shape[1]
+            f_enc = np.zeros((D*K), dtype=np.float32)
+            if powernorm:
+                f_enc = np.sign(f_enc) * np.sqrt(np.abs(f_enc))
+            f_enc = normalize(f_enc.reshape(1, -1), norm='l2').flatten()
+            encodings.append(f_enc)
+            continue
+            
         a = assignments(desc, mus)
         
         T,D = desc.shape
@@ -300,6 +472,31 @@ if __name__ == '__main__':
     parser = parseArgs(parser)
     args = parser.parse_args()
     np.random.seed(42) # fix random seed
+    
+    # If --extract-sift is set, extract descriptors and save them
+    if args.extract_sift:
+        print('> Extracting SIFT descriptors...')
+        # Get image files for train and test (original images, not descriptors)
+        train_images, _ = getImageFiles(args.in_train, args.labels_train)
+        test_images, _ = getImageFiles(args.in_test, args.labels_test)
+        
+        # Use descriptor suffix for saving (default to _SIFT_patch_pr.pkl.gz)
+        # If user provided a descriptor suffix, use it; otherwise use default
+        desc_suffix = args.suffix
+        if desc_suffix in ['.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp']:
+            # If suffix is an image extension, use default descriptor suffix
+            desc_suffix = '_SIFT_patch_pr.pkl.gz'
+        
+        # Extract and save SIFT descriptors
+        print('> Extracting SIFT for training images...')
+        extractAndSaveSIFT(train_images, 'icdar2017-sift-train', suffix=desc_suffix)
+        print('> Extracting SIFT for test images...')
+        extractAndSaveSIFT(test_images, 'icdar2017-sift-test', suffix=desc_suffix)
+        
+        # Update input folders and suffix to use the extracted descriptors
+        args.in_train = 'icdar2017-sift-train'
+        args.in_test = 'icdar2017-sift-test'
+        args.suffix = desc_suffix
    
     # a) dictionary
     files_train, labels_train = getFiles(args.in_train, args.suffix,

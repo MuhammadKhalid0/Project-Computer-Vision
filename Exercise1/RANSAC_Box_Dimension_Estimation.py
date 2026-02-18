@@ -75,9 +75,6 @@ def plot_point_cloud(cloud, color_by='z', sample_step=1, save_path=None):
     else:
         plt.show()
 
-import matplotlib.pyplot as plt
-import numpy as np
-
 def plot_amplitude_image(image, title="Amplitude Image", cmap='gray', save_path=None):
     """
     Display or save an amplitude (or intensity) image.
@@ -155,12 +152,222 @@ def ransac_plane(points, threshold=0.05, max_iter=5000, early_stop_ratio=0.85, r
 
     return best_model, best_mask  # (n,d), (N,)
 
+def compute_mlesac_cost(dists, threshold, gamma):
+    """
+    Compute MLESAC cost function: C = SUM ( p(d(s_i)) )
+    where p = d(s_i) if d(s_i) < epslion, else p = Gamma (Error Constant)
+    
+    Parameters:
+    dists : np.ndarray
+        Array of distances from points to the model.
+    threshold : float
+        Inlier threshold epslion.
+    gamma : float
+        Outlier penalty constant (must be > threshold).
+    
+    Returns:
+    float
+        Total MLESAC cost (Sum of distances of inliers and gamma of outliers).
+    """
+    # Inliers contribute their distance, outliers contribute gamma
+    cost = np.sum(np.where(dists < threshold, dists, gamma))
+    return cost
+
+def mlesac_plane(points, threshold=0.05, gamma=None, max_iter=5000, early_stop_ratio=0.85, rng=None):
+    """
+    MLESAC (Maximum Likelihood Estimation Sample Consensus) plane fitting.
+    Uses distance-based cost function instead of binary inlier counting.
+    
+    Parameters:
+    points : np.ndarray
+        (N,3) valid 3D points.
+    threshold : float
+        Inlier distance threshold epslion.
+    gamma : float, optional
+        Outlier penalty constant. If None, defaults to threshold * 3.
+        Must satisfy gamma > threshold.
+    max_iter : int
+        Maximum number of iterations.
+    early_stop_ratio : float
+        Early stopping if cost suggests this ratio of inliers.
+    rng : np.random.Generator, optional
+        Random number generator.
+    
+    Returns:
+    tuple
+        ((n, d), inlier_mask) where n is normal, d is plane offset, mask is boolean array.
+    """
+    rng = np.random.default_rng() if rng is None else rng
+    if gamma is None:
+        gamma = threshold * 3.0
+    if gamma <= threshold:
+        gamma = threshold * 3.0  # ensure gamma > threshold
+    
+    N = points.shape[0]
+    best_cost = np.inf
+    best_model = None
+    best_mask = None
+    
+    for _ in range(max_iter):
+        idx = rng.choice(N, size=3, replace=False)
+        model = fit_plane_from_3pts(points[idx])
+        if model is None:
+            continue
+        n, d = model
+        # distances = abs(n·x - d)
+        dists = np.abs(points @ n - d)
+        # Compute MLESAC cost
+        cost = compute_mlesac_cost(dists, threshold, gamma)
+        
+        if cost < best_cost:
+            best_cost = cost
+            best_model = (n, d)
+            best_mask = dists <= threshold
+            # Early stopping: if cost suggests high inlier ratio
+            expected_inlier_cost = threshold * early_stop_ratio * N
+            if cost < expected_inlier_cost:
+                break
+    
+    return best_model, best_mask  # (n,d), (N,)
+
+def preemptive_ransac_plane(points, threshold=0.05, M=256, B=None, max_iter=None, 
+                            scoring='ransac', gamma=None, early_stop_ratio=0.85, rng=None):
+    """
+    Preemptive RANSAC plane fitting.
+    Generates M hypotheses upfront and evaluates them in batches, progressively
+    pruning hypotheses using preemption function f(i) = (Using FLOOR function for all divisions) [M·2^(-[i/B])].
+    
+    Parameters:
+    points : np.ndarray
+        (N,3) valid 3D points.
+    threshold : float
+        Inlier distance threshold epslion.
+    M : int
+        Initial number of hypotheses to generate.
+    B : int, optional
+        Batch size (points per evaluation round). If None, defaults to N // 10.
+    max_iter : int, optional
+        Maximum iterations (not used in preemptive, kept for compatibility).
+    scoring : str
+        Scoring method: 'ransac' (inlier count) or 'mlesac' (distance-based cost).
+    gamma : float, optional
+        Outlier penalty for MLESAC scoring. If None and scoring='mlesac', uses threshold * 3.
+    early_stop_ratio : float
+        Early stopping threshold (not typically used in preemptive).
+    rng : np.random.Generator, optional
+        Random number generator.
+    
+    Returns:
+    tuple
+        ((n, d), inlier_mask) where n is normal, d is plane offset, mask is boolean array.
+    """
+    rng = np.random.default_rng() if rng is None else rng
+    N = points.shape[0]
+    if B is None:
+        B = max(10, N // 10)  # ensure reasonable batch size
+    if scoring == 'mlesac':
+        if gamma is None:
+            gamma = threshold * 3.0
+        if gamma <= threshold:
+            gamma = threshold * 3.0
+    
+    # Step 1: Generate M hypotheses upfront
+    hypotheses = []
+    for _ in range(M):
+        idx = rng.choice(N, size=3, replace=False)
+        model = fit_plane_from_3pts(points[idx])
+        if model is not None:
+            hypotheses.append(model)
+    
+    if len(hypotheses) == 0:
+        raise ValueError("Failed to generate any valid hypotheses")
+    
+    M_actual = len(hypotheses)
+    scores = np.zeros(M_actual)  # Track score for each hypothesis
+    active_indices = list(range(M_actual))  # Which hypotheses are still active
+    
+    # Shuffle point indices for random evaluation order
+    point_indices = np.arange(N)
+    rng.shuffle(point_indices)
+    points_evaluated = 0
+    
+    # Step 2: Iterative evaluation with preemption
+    while len(active_indices) > 1 and points_evaluated < N:
+        # Get next batch of B points
+        batch_size = min(B, N - points_evaluated)
+        batch_indices = point_indices[points_evaluated:points_evaluated + batch_size]
+        batch_points = points[batch_indices]
+        
+        # Evaluate all active hypotheses on this batch
+        for h_idx in active_indices:
+            n, d = hypotheses[h_idx]
+            dists = np.abs(batch_points @ n - d)
+            
+            if scoring == 'ransac':
+                # RANSAC scoring: count inliers
+                inlier_count = int((dists <= threshold).sum())
+                scores[h_idx] += inlier_count
+            elif scoring == 'mlesac':
+                # MLESAC scoring: distance-based cost (lower is better, so negate)
+                cost = compute_mlesac_cost(dists, threshold, gamma)
+                scores[h_idx] -= cost  # negate because we want to maximize (minimize cost)
+            else:
+                raise ValueError(f"Unknown scoring method: {scoring}")
+        
+        points_evaluated += batch_size
+        
+        # Calculate preemption: f(i) = [M·2^(-[i/B])]
+        stage = points_evaluated // B
+        num_keep = int(np.floor(M_actual * (2 ** (-stage))))
+        num_keep = max(1, min(num_keep, len(active_indices)))
+        
+        # Sort active hypotheses by score and keep top ones
+        # For RANSAC: higher score is better; for MLESAC: higher (less negative) is better
+        sorted_active = sorted(active_indices, key=lambda i: scores[i], reverse=True)
+        active_indices = sorted_active[:num_keep]
+    
+    # Step 3: Final evaluation on all points for the best remaining hypothesis
+    best_idx = active_indices[0]
+    n, d = hypotheses[best_idx]
+    dists = np.abs(points @ n - d)
+    inlier_mask = dists <= threshold
+    
+    return (n, d), inlier_mask  # (n,d), (N,)
+
 def plane_mask_from_inliers(inlier_mask_flat, H, W): # Function to return the mask into binary image
     mask = np.zeros(H*W, dtype=bool)
     mask[:len(inlier_mask_flat)] = inlier_mask_flat
     return mask.reshape(H, W)
 
-def find_floor_and_box_planes(PC, threshold_floor, threshold_box, max_iter=10000):
+def find_floor_and_box_planes(PC, threshold_floor, threshold_box, max_iter=10000, 
+                               algorithm='ransac', gamma=None, M=256, B=None):
+    """
+    Find floor and box top planes using specified RANSAC variant.
+    
+    Parameters
+    ----------
+    PC : np.ndarray
+        Point cloud (H, W, 3).
+    threshold_floor : float
+        Inlier threshold for floor plane.
+    threshold_box : float
+        Inlier threshold for box top plane.
+    max_iter : int
+        Maximum iterations (for RANSAC/MLESAC).
+    algorithm : str
+        Algorithm to use: 'ransac', 'mlesac', 'preemptive', 'preemptive-mlesac'.
+    gamma : float, optional
+        MLESAC outlier penalty (required for mlesac/preemptive-mlesac).
+    M : int
+        Initial hypotheses for Preemptive RANSAC.
+    B : int, optional
+        Batch size for Preemptive RANSAC.
+    
+    Returns
+    -------
+    tuple
+        ((n_floor, d_floor, floor_mask), (n_top, d_top, box_top_mask))
+    """
     H, W, _ = PC.shape
     pts = PC.reshape(-1, 3) # Flatten
 
@@ -168,10 +375,29 @@ def find_floor_and_box_planes(PC, threshold_floor, threshold_box, max_iter=10000
     valid = pts[:, 2] != 0
     pts_valid = pts[valid]
 
-    # 1) floor
-    (n_floor, d_floor), inliers_floor = ransac_plane(
-        pts_valid, threshold=threshold_floor, max_iter=max_iter
-    )
+    # 1) floor - select algorithm
+    if algorithm == 'ransac':
+        (n_floor, d_floor), inliers_floor = ransac_plane(
+            pts_valid, threshold=threshold_floor, max_iter=max_iter
+        )
+    elif algorithm == 'mlesac':
+        if gamma is None:
+            gamma = threshold_floor * 3.0
+        (n_floor, d_floor), inliers_floor = mlesac_plane(
+            pts_valid, threshold=threshold_floor, gamma=gamma, max_iter=max_iter
+        )
+    elif algorithm == 'preemptive':
+        (n_floor, d_floor), inliers_floor = preemptive_ransac_plane(
+            pts_valid, threshold=threshold_floor, M=M, B=B, scoring='ransac'
+        )
+    elif algorithm == 'preemptive-mlesac':
+        if gamma is None:
+            gamma = threshold_floor * 3.0
+        (n_floor, d_floor), inliers_floor = preemptive_ransac_plane(
+            pts_valid, threshold=threshold_floor, M=M, B=B, scoring='mlesac', gamma=gamma
+        )
+    else:
+        raise ValueError(f"Unknown algorithm: {algorithm}")
 
     # map back to HxW (for visualization only)
     floor_mask = np.zeros(H*W, dtype=bool)
@@ -183,7 +409,6 @@ def find_floor_and_box_planes(PC, threshold_floor, threshold_box, max_iter=10000
     floor_clean = binary_closing(floor_clean, structure=np.ones((5,5)))
     floor_clean = binary_fill_holes(floor_clean)
 
-    # ---------- Minimal changes start here ----------
     # (2) Fix normal direction so that "above" means positive signed distance.
     n_floor_u = n_floor / np.linalg.norm(n_floor)
     signed_valid = pts_valid @ n_floor_u - d_floor
@@ -198,12 +423,29 @@ def find_floor_and_box_planes(PC, threshold_floor, threshold_box, max_iter=10000
 
     keep_mask = valid & (np.abs(signed_all) > floor_remove_eps) & (signed_all > 0)
     pts_keep = pts[keep_mask]
-    # ---------- Minimal changes end here ----------
 
-    # 3) box top
-    (n_top, d_top), inliers_top = ransac_plane(
-        pts_keep, threshold=threshold_box, max_iter=max_iter
-    )
+    # 3) box top - use same algorithm
+    if algorithm == 'ransac':
+        (n_top, d_top), inliers_top = ransac_plane(
+            pts_keep, threshold=threshold_box, max_iter=max_iter
+        )
+    elif algorithm == 'mlesac':
+        if gamma is None:
+            gamma = threshold_box * 3.0
+        (n_top, d_top), inliers_top = mlesac_plane(
+            pts_keep, threshold=threshold_box, gamma=gamma, max_iter=max_iter
+        )
+    elif algorithm == 'preemptive':
+        (n_top, d_top), inliers_top = preemptive_ransac_plane(
+            pts_keep, threshold=threshold_box, M=M, B=B, scoring='ransac'
+        )
+    elif algorithm == 'preemptive-mlesac':
+        if gamma is None:
+            gamma = threshold_box * 3.0
+        (n_top, d_top), inliers_top = preemptive_ransac_plane(
+            pts_keep, threshold=threshold_box, M=M, B=B, scoring='mlesac', gamma=gamma
+        )
+
     box_mask_all = np.zeros(H*W, dtype=bool)
     keep_idx = np.where(keep_mask)[0]
     box_mask_all[keep_idx[inliers_top]] = True
@@ -346,14 +588,23 @@ def corners_pixels_from_3d(PC, corners3d):
     return np.c_[rows, cols]
 
 def main():
-    parser = argparse.ArgumentParser(description="Estimate box height from planes using RANSAC.")
+    parser = argparse.ArgumentParser(description="Estimate box height from planes using RANSAC variants.")
     parser.add_argument("mat_path", type=Path, help="Path to the .mat file")
     parser.add_argument("--example", type=int, default=1, help="Example number in the .mat (default: 1)")
-    parser.add_argument("--th_floor", type=float, default=0.01, help="RANSAC inlier threshold for floor (scene units)")
-    parser.add_argument("--th_top", type=float, default=0.01, help="RANSAC inlier threshold for box top (scene units)")
+    parser.add_argument("--th_floor", type=float, default=0.01, help="Inlier threshold for floor (scene units)")
+    parser.add_argument("--th_top", type=float, default=0.01, help="Inlier threshold for box top (scene units)")
+    parser.add_argument("--algorithm", type=str, default="ransac", 
+                        choices=["ransac", "mlesac", "preemptive", "preemptive-mlesac"],
+                        help="Algorithm to use: ransac, mlesac, preemptive, preemptive-mlesac (default: ransac)")
+    parser.add_argument("--gamma", type=float, default=None, 
+                        help="MLESAC outlier penalty (default: threshold * 3, only for mlesac/preemptive-mlesac)")
+    parser.add_argument("--M", type=int, default=256, 
+                        help="Preemptive RANSAC: initial number of hypotheses (default: 256)")
+    parser.add_argument("--B", type=int, default=None, 
+                        help="Preemptive RANSAC: batch size (default: N//10)")
     parser.add_argument("--save-viz", action="store_true", help="Save amplitude/cloud/mask visualizations")
     parser.add_argument("--sample-step", type=int, default=0, help="Downsample for point-cloud scatter (speed)")
-    parser.add_argument("--max-itr", type=int, default=10000, help="Number of iterations to use in RANSAC Algoraithm")
+    parser.add_argument("--max-itr", type=int, default=10000, help="Number of iterations for RANSAC/MLESAC")
     args = parser.parse_args()
 
     # In headless terminals, Agg avoids show() warnings
@@ -373,14 +624,32 @@ def main():
         except Exception as e:
             print(f"[warn] Point cloud plot skipped: {e}")
 
-    # 3) Find planes + masks
+    # 3) Find planes + masks using selected algorithm
+    print(f"Using algorithm: {args.algorithm}")
+    
+    # Prepare algorithm-specific parameters
+    algorithm_params = {
+        'threshold_floor': args.th_floor,
+        'threshold_box': args.th_top,
+        'max_iter': args.max_itr,
+        'algorithm': args.algorithm
+    }
+    
+    # Add algorithm-specific parameters
+    if args.algorithm in ['mlesac', 'preemptive-mlesac']:
+        if args.gamma is None:
+            args.gamma = args.th_floor * 3.0
+            print(f"Using default gamma = {args.gamma:.6f} (threshold * 3)")
+        algorithm_params['gamma'] = args.gamma
+    
+    if args.algorithm in ['preemptive', 'preemptive-mlesac']:
+        algorithm_params['M'] = args.M
+        algorithm_params['B'] = args.B
+        print(f"Preemptive RANSAC: M={args.M}, B={args.B if args.B else 'auto'}")
+
+    # Call find_floor_and_box_planes with appropriate parameters
     (n_floor, d_floor, floor_mask), (n_top, d_top, box_top_mask) = \
-    find_floor_and_box_planes(
-        PC,
-        threshold_floor=args.th_floor,
-        threshold_box=args.th_top,
-        max_iter=args.max_itr
-    )
+        find_floor_and_box_planes(PC, **algorithm_params)
 
     # 4) Height
     h = box_height(n_floor, d_floor, n_top, d_top)
@@ -394,19 +663,20 @@ def main():
     # 5) Save masks / overlays
     if args.save_viz:
         # raw masks already cleaned in find_floor_and_box_planes
-        plt.imsave(f"Results/example{args.example}_floor_mask.png", floor_mask, cmap='gray')
-        plt.imsave(f"Results/example{args.example}_boxtop_mask.png", box_top_mask, cmap='gray')
+        algo_suffix = f"_{args.algorithm}"
+        plt.imsave(f"Results/example{args.example}_floor_mask{algo_suffix}.png", floor_mask, cmap='gray')
+        plt.imsave(f"Results/example{args.example}_boxtop_mask{algo_suffix}.png", box_top_mask, cmap='gray')
 
         # Overlays (use amplitude as the background)
-        save_overlay(A, floor_mask, f"Floor mask – Example {args.example}",
-                     f"Results/example{args.example}_floor_overlay.png")
-        save_overlay(A, box_top_mask, f"Box-top mask – Example {args.example}",
-                     f"Results/example{args.example}_boxtop_overlay.png")
+        save_overlay(A, floor_mask, f"Floor mask ({args.algorithm}) – Example {args.example}",
+                     f"Results/example{args.example}_floor_overlay{algo_suffix}.png")
+        save_overlay(A, box_top_mask, f"Box-top mask ({args.algorithm}) – Example {args.example}",
+                     f"Results/example{args.example}_boxtop_overlay{algo_suffix}.png")
         
         corners_rc = corners_pixels_from_3d(PC, Pcorners3D)
         save_corners_overlay(A, corners_rc,
-            f"Results/example{args.example}_top_corners_refined.png",
-            f"Top corners (3D-refined) – Example {args.example}")
+            f"Results/example{args.example}_top_corners_refined{algo_suffix}.png",
+            f"Top corners ({args.algorithm}) – Example {args.example}")
 
 
 if __name__ == "__main__":
